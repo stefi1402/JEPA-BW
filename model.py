@@ -19,11 +19,11 @@ class CoordinateTransformer(nn.Module):
         self.d = d
         self.input_length = input_length
         self.prediction_length = prediction_length
-        self.frame_dim = d * d
+        self.frame_dim = d * d 
 
         self.frame_embedding = nn.Linear(self.frame_dim, embed_dim)
         self.time_embedding = nn.Parameter(
-            torch.randn(1, input_length, embed_dim)
+            torch.randn(1, input_length, embed_dim) * 0.02
         )
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -52,9 +52,9 @@ class CoordinateTransformer(nn.Module):
         x = x + self.time_embedding
         z = self.transformer(x)
 
-        # Use the final context representation
-        z_last = z[:, -1, :]
-        coords = self.predictor(z_last)
+        # Use a summary of the whole sequence instead of just the last timestep
+        z_pooled = z.mean(dim=1)
+        coords = self.predictor(z_pooled)
         coords = coords.view(-1, self.prediction_length, 2)
         return coords
 

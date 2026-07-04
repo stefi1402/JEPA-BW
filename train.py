@@ -11,7 +11,13 @@ from model import CoordinateTransformer
 
 
 def train(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        "cuda" if torch.cuda.is_available()
+        else "mps" if torch.backends.mps.is_available()
+        else "cpu"
+    )
+    print(f"Device: {device}")
+    print("Args:", vars(args))
 
     train_dataset = BWSequenceDataset(
         path=Path(args.data_dir) / "train.npz",
@@ -23,6 +29,9 @@ def train(args):
         input_length=args.input_length,
         prediction_length=args.prediction_length,
     )
+
+    print(f"Train sequences: {len(train_dataset)} | Val sequences: {len(val_dataset)}")
+    print(f"Batches per epoch: {len(train_dataset) // args.batch_size}")
 
     train_loader = DataLoader(
         train_dataset,
@@ -53,6 +62,7 @@ def train(args):
     )
 
     best_val_loss = float("inf")
+    epochs_without_improvement = 0
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -97,6 +107,7 @@ def train(args):
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
+            epochs_without_improvement = 0
             checkpoint = {
                 "model_state_dict": model.state_dict(),
                 "d": args.d,
@@ -108,6 +119,14 @@ def train(args):
                 "dropout": args.dropout,
             }
             torch.save(checkpoint, checkpoint_dir / "best_model.pt")
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= args.patience:
+                print(
+                    f"Early stopping at epoch {epoch + 1} "
+                    f"(no improvement for {args.patience} epochs)"
+                )
+                break
 
     print(f"Best validation loss: {best_val_loss:.4f}")
     print(f"Saved best model to {checkpoint_dir / 'best_model.pt'}")
