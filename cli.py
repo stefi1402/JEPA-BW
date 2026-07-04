@@ -11,7 +11,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--output-dir", type=str, default="data")
     generate_parser.add_argument("--d", type=int, default=10)
     generate_parser.add_argument("--T", type=int, default=100)
-    generate_parser.add_argument("--p", type=float, default=0.1)
+    generate_parser.add_argument("--p", type=float, default=0)
     generate_parser.add_argument("--k", type=int, default=1)
     generate_parser.add_argument("--num-train", type=int, default=10000)
     generate_parser.add_argument("--num-val", type=int, default=2000)
