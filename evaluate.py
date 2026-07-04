@@ -7,24 +7,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from data import BWSequenceDataset
-from model import CoordinateTransformer
+from model import load_model
 
 
 def test(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    checkpoint = torch.load(args.checkpoint_path, map_location=device)
-
-    model = CoordinateTransformer(
-        d=checkpoint["d"],
-        input_length=checkpoint["input_length"],
-        prediction_length=checkpoint["prediction_length"],
-        embed_dim=checkpoint["embed_dim"],
-        num_heads=checkpoint["num_heads"],
-        num_layers=checkpoint["num_layers"],
-        dropout=checkpoint["dropout"],
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model, checkpoint, device = load_model(args.checkpoint_path)
     model.eval()
 
     test_dataset = BWSequenceDataset(

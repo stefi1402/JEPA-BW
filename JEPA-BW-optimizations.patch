@@ -1,0 +1,460 @@
+diff --git a/cli.py b/cli.py
+index a200fc5..38fbe3a 100644
+--- a/cli.py
++++ b/cli.py
+@@ -11,11 +11,16 @@ def build_parser() -> argparse.ArgumentParser:
+     generate_parser.add_argument("--output-dir", type=str, default="data")
+     generate_parser.add_argument("--d", type=int, default=10)
+     generate_parser.add_argument("--T", type=int, default=100)
+-    generate_parser.add_argument("--p", type=float, default=0)
++    # NOTE: p=0 means the object never moves, which makes the whole
++    # forecasting task trivial ("predict the starting position"). Default
++    # to a nonzero move probability so `generate` produces a real task
++    # out of the box; override with --p 0 if a static baseline is wanted.
++    generate_parser.add_argument("--p", type=float, default=0.2)
+     generate_parser.add_argument("--k", type=int, default=1)
+     generate_parser.add_argument("--num-train", type=int, default=10000)
+     generate_parser.add_argument("--num-val", type=int, default=2000)
+     generate_parser.add_argument("--num-test", type=int, default=2000)
++    generate_parser.add_argument("--seed", type=int, default=None)
+ 
+     transformer_parser = subparsers.add_parser("transformer")
+     transformer_parser.add_argument("--d", type=int, default=10)
+@@ -23,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
+     transformer_parser.add_argument("--prediction-length", type=int, default=50)
+     transformer_parser.add_argument("--embed-dim", type=int, default=64)
+     transformer_parser.add_argument("--num-heads", type=int, default=4)
+-    transformer_parser.add_argument("--num-layers", type=int, default=1)
++    transformer_parser.add_argument("--num-layers", type=int, default=2)
+     transformer_parser.add_argument("--dropout", type=float, default=0.1)
+     transformer_parser.add_argument("--batch-size", type=int, default=64)
+ 
+@@ -33,15 +38,22 @@ def build_parser() -> argparse.ArgumentParser:
+     train_parser.add_argument("--d", type=int, default=10)
+     train_parser.add_argument("--input-length", type=int, default=50)
+     train_parser.add_argument("--prediction-length", type=int, default=50)
+-    train_parser.add_argument("--embed-dim", type=int, default=32)
++    # Was inconsistent with the `transformer` subcommand's default (64);
++    # unified here so a `transformer` dry run reflects what `train` builds.
++    train_parser.add_argument("--embed-dim", type=int, default=64)
+     train_parser.add_argument("--num-heads", type=int, default=4)
+-    train_parser.add_argument("--num-layers", type=int, default=1)
++    train_parser.add_argument("--num-layers", type=int, default=2)
+     train_parser.add_argument("--dropout", type=float, default=0.1)
+     train_parser.add_argument("--batch-size", type=int, default=64)
+     train_parser.add_argument("--epochs", type=int, default=100)
+     train_parser.add_argument("--lr", type=float, default=1e-3)
+     train_parser.add_argument("--weight-decay", type=float, default=1e-4)
+     train_parser.add_argument("--patience", type=int, default=15)
++    train_parser.add_argument("--seed", type=int, default=None)
++    train_parser.add_argument(
++        "--num-workers", type=int, default=0,
++        help="DataLoader worker processes. >0 only helps if loading is a bottleneck.",
++    )
+ 
+     test_parser = subparsers.add_parser("test")
+     test_parser.add_argument("--data-dir", type=str, default="data")
+diff --git a/data.py b/data.py
+index 95277e8..be36212 100644
+--- a/data.py
++++ b/data.py
+@@ -33,27 +33,69 @@ def generate_one_sequence(d, T, p, k):
+     return frames, coords
+ 
+ 
++def generate_batch(n, d, T, p, k, rng=None):
++    """Vectorized equivalent of calling generate_one_sequence n times.
++
++    generate_one_sequence is kept around for single-sequence use (e.g. a
++    quick sanity check), but generating a full dataset by calling it in a
++    Python for-loop means T * total_sequences pure-Python iterations
++    (e.g. 100 * 14000 = 1.4M) just to build a training set. Here the
++    T-length loop stays in Python, but every iteration operates on all n
++    sequences at once via numpy, so the cost is ~T vectorized steps
++    instead of ~T * n scalar ones.
++
++    Note: this consumes randomness in a different order than repeated
++    generate_one_sequence calls, so it won't reproduce bit-identical
++    datasets for the same seed, but the generating distribution is
++    identical (uniform start position, independent per-step move
++    probability p, uniform choice of the 4 directions).
++    """
++    if rng is None:
++        rng = np.random.default_rng()
++
++    frames = np.zeros((n, T, d, d), dtype=np.float32)
++    coords = np.zeros((n, T, 2), dtype=np.float32)
++
++    row = rng.integers(0, d, size=n)
++    col = rng.integers(0, d, size=n)
++    idx = np.arange(n)
++
++    for t in range(T):
++        frames[idx, t, row, col] = 1.0
++        coords[idx, t, 0] = row
++        coords[idx, t, 1] = col
++
++        moves = rng.random(n) < p
++        direction = rng.integers(0, 4, size=n)  # 0=up 1=down 2=left 3=right
++
++        up = moves & (direction == 0)
++        down = moves & (direction == 1)
++        left = moves & (direction == 2)
++        right = moves & (direction == 3)
++
++        row[up] = np.maximum(0, row[up] - k)
++        row[down] = np.minimum(d - 1, row[down] + k)
++        col[left] = np.maximum(0, col[left] - k)
++        col[right] = np.minimum(d - 1, col[right] + k)
++
++    return frames, coords
++
++
+ def generate_dataset(args):
+     output_dir = Path(args.output_dir)
+     output_dir.mkdir(parents=True, exist_ok=True)
+ 
+     total_sequences = args.num_train + args.num_val + args.num_test
+-
+-    all_frames = []
+-    all_coords = []
+-
+-    for _ in range(total_sequences):
+-        frames, coords = generate_one_sequence(
+-            d=args.d,
+-            T=args.T,
+-            p=args.p,
+-            k=args.k,
+-        )
+-        all_frames.append(frames)
+-        all_coords.append(coords)
+-
+-    all_frames = np.stack(all_frames)
+-    all_coords = np.stack(all_coords)
++    rng = np.random.default_rng(getattr(args, "seed", None))
++
++    all_frames, all_coords = generate_batch(
++        n=total_sequences,
++        d=args.d,
++        T=args.T,
++        p=args.p,
++        k=args.k,
++        rng=rng,
++    )
+ 
+     train_end = args.num_train
+     val_end = args.num_train + args.num_val
+diff --git a/diagnostic_embeddings.py b/diagnostic_embeddings.py
+index dd31bc9..56b47f0 100644
+--- a/diagnostic_embeddings.py
++++ b/diagnostic_embeddings.py
+@@ -7,28 +7,12 @@ import numpy as np
+ import torch
+ 
+ from data import BWSequenceDataset
+-from model import CoordinateTransformer
++from model import load_model
+ 
+ 
+ def check_direction_sensitivity(data_dir="data", checkpoint_path="checkpoints/best_model.pt",
+                                  lookback=5):
+-    device = torch.device(
+-        "cuda" if torch.cuda.is_available()
+-        else "mps" if torch.backends.mps.is_available()
+-        else "cpu"
+-    )
+-
+-    checkpoint = torch.load(checkpoint_path, map_location=device)
+-    model = CoordinateTransformer(
+-        d=checkpoint["d"],
+-        input_length=checkpoint["input_length"],
+-        prediction_length=checkpoint["prediction_length"],
+-        embed_dim=checkpoint["embed_dim"],
+-        num_heads=checkpoint["num_heads"],
+-        num_layers=checkpoint["num_layers"],
+-        dropout=checkpoint["dropout"],
+-    ).to(device)
+-    model.load_state_dict(checkpoint["model_state_dict"])
++    model, checkpoint, device = load_model(checkpoint_path)
+     model.eval()
+ 
+     input_length = checkpoint["input_length"]
+diff --git a/evaluate.py b/evaluate.py
+index 6b0be2f..d5729ca 100644
+--- a/evaluate.py
++++ b/evaluate.py
+@@ -7,24 +7,11 @@ import torch.nn as nn
+ from torch.utils.data import DataLoader
+ 
+ from data import BWSequenceDataset
+-from model import CoordinateTransformer
++from model import load_model
+ 
+ 
+ def test(args):
+-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-
+-    checkpoint = torch.load(args.checkpoint_path, map_location=device)
+-
+-    model = CoordinateTransformer(
+-        d=checkpoint["d"],
+-        input_length=checkpoint["input_length"],
+-        prediction_length=checkpoint["prediction_length"],
+-        embed_dim=checkpoint["embed_dim"],
+-        num_heads=checkpoint["num_heads"],
+-        num_layers=checkpoint["num_layers"],
+-        dropout=checkpoint["dropout"],
+-    ).to(device)
+-    model.load_state_dict(checkpoint["model_state_dict"])
++    model, checkpoint, device = load_model(args.checkpoint_path)
+     model.eval()
+ 
+     test_dataset = BWSequenceDataset(
+diff --git a/model.py b/model.py
+index 4d2196c..40cd3ef 100644
+--- a/model.py
++++ b/model.py
+@@ -1,9 +1,39 @@
+ """Transformer model used to predict future coordinates."""
+ 
++from pathlib import Path
++
+ import torch
+ import torch.nn as nn
+ 
+ 
++def load_model(checkpoint_path, device=None):
++    """Build a CoordinateTransformer from a saved checkpoint.
++
++    Centralizes the "read config out of checkpoint, build model, load
++    weights" dance that used to be duplicated in evaluate.py,
++    diagnostic_embeddings.py, and anywhere else a checkpoint is loaded.
++    """
++    if device is None:
++        device = torch.device(
++            "cuda" if torch.cuda.is_available()
++            else "mps" if torch.backends.mps.is_available()
++            else "cpu"
++        )
++
++    checkpoint = torch.load(Path(checkpoint_path), map_location=device)
++    model = CoordinateTransformer(
++        d=checkpoint["d"],
++        input_length=checkpoint["input_length"],
++        prediction_length=checkpoint["prediction_length"],
++        embed_dim=checkpoint["embed_dim"],
++        num_heads=checkpoint["num_heads"],
++        num_layers=checkpoint["num_layers"],
++        dropout=checkpoint["dropout"],
++    ).to(device)
++    model.load_state_dict(checkpoint["model_state_dict"])
++    return model, checkpoint, device
++
++
+ class CoordinateTransformer(nn.Module):
+     def __init__(
+         self,
+@@ -52,9 +82,20 @@ class CoordinateTransformer(nn.Module):
+         x = x + self.time_embedding
+         z = self.transformer(x)
+ 
+-        # Use a summary of the whole sequence instead of just the last timestep
+-        z_pooled = z.mean(dim=1)
+-        coords = self.predictor(z_pooled)
++        # Pool on the last timestep, not the mean over all timesteps.
++        #
++        # The encoder is bidirectional (no causal mask), so z[:, -1, :]
++        # already attends to the whole sequence and is a valid "summary."
++        # But mean-pooling over 50+ frames dilutes exactly the signal this
++        # task depends on: where the object is *right now* and which way
++        # it's currently moving. That recent-motion signal lives in a
++        # handful of frames near the end; averaging it in with distant,
++        # already-stale positions pushes the model toward "predict the
++        # average / stay put" rather than "extrapolate the current
++        # trajectory" (see diagnostic_embeddings.py, which exists to check
++        # for exactly this failure mode).
++        z_last = z[:, -1, :]
++        coords = self.predictor(z_last)
+         coords = coords.view(-1, self.prediction_length, 2)
+         return coords
+ 
+diff --git a/train.py b/train.py
+index 967a2d3..9e279bd 100644
+--- a/train.py
++++ b/train.py
+@@ -2,6 +2,7 @@
+ 
+ from pathlib import Path
+ 
++import numpy as np
+ import torch
+ import torch.nn as nn
+ from torch.utils.data import DataLoader
+@@ -10,12 +11,35 @@ from data import BWSequenceDataset
+ from model import CoordinateTransformer
+ 
+ 
++def _model_config(args):
++    """Single source of truth for the fields that reconstruct a model."""
++    return {
++        "d": args.d,
++        "input_length": args.input_length,
++        "prediction_length": args.prediction_length,
++        "embed_dim": args.embed_dim,
++        "num_heads": args.num_heads,
++        "num_layers": args.num_layers,
++        "dropout": args.dropout,
++    }
++
++
+ def train(args):
++    if getattr(args, "seed", None) is not None:
++        torch.manual_seed(args.seed)
++        np.random.seed(args.seed)
++
+     device = torch.device(
+         "cuda" if torch.cuda.is_available()
+         else "mps" if torch.backends.mps.is_available()
+         else "cpu"
+     )
++    use_cuda = device.type == "cuda"
++    if use_cuda:
++        # Let cuDNN pick the fastest conv/attention kernels for our fixed
++        # input shapes instead of using generic defaults.
++        torch.backends.cudnn.benchmark = True
++
+     print(f"Device: {device}")
+     print("Args:", vars(args))
+ 
+@@ -33,26 +57,25 @@ def train(args):
+     print(f"Train sequences: {len(train_dataset)} | Val sequences: {len(val_dataset)}")
+     print(f"Batches per epoch: {len(train_dataset) // args.batch_size}")
+ 
++    num_workers = getattr(args, "num_workers", 0)
+     train_loader = DataLoader(
+         train_dataset,
+         batch_size=args.batch_size,
+         shuffle=True,
++        num_workers=num_workers,
++        pin_memory=use_cuda,
++        persistent_workers=num_workers > 0,
+     )
+     val_loader = DataLoader(
+         val_dataset,
+         batch_size=args.batch_size,
+         shuffle=False,
++        num_workers=num_workers,
++        pin_memory=use_cuda,
++        persistent_workers=num_workers > 0,
+     )
+ 
+-    model = CoordinateTransformer(
+-        d=args.d,
+-        input_length=args.input_length,
+-        prediction_length=args.prediction_length,
+-        embed_dim=args.embed_dim,
+-        num_heads=args.num_heads,
+-        num_layers=args.num_layers,
+-        dropout=args.dropout,
+-    ).to(device)
++    model = CoordinateTransformer(**_model_config(args)).to(device)
+ 
+     loss_fn = nn.SmoothL1Loss()
+     optimizer = torch.optim.AdamW(
+@@ -60,6 +83,14 @@ def train(args):
+         lr=args.lr,
+         weight_decay=args.weight_decay,
+     )
++    # Halve the LR when val loss plateaus, so a fixed --lr doesn't have to
++    # be exactly right for the whole run.
++    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
++        optimizer, mode="min", factor=0.5, patience=max(1, args.patience // 3)
++    )
++
++    # Mixed precision only pays off on CUDA; on CPU/MPS it's a no-op path.
++    scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
+ 
+     best_val_loss = float("inf")
+     epochs_without_improvement = 0
+@@ -71,15 +102,22 @@ def train(args):
+         train_loss = 0.0
+ 
+         for x, y in train_loader:
+-            x = x.to(device)
+-            y = y.to(device)
++            x = x.to(device, non_blocking=use_cuda)
++            y = y.to(device, non_blocking=use_cuda)
++
++            optimizer.zero_grad(set_to_none=True)
+ 
+-            pred = model(x)
+-            loss = loss_fn(pred, y)
++            with torch.amp.autocast("cuda", enabled=use_cuda):
++                pred = model(x)
++                loss = loss_fn(pred, y)
+ 
+-            optimizer.zero_grad()
+-            loss.backward()
+-            optimizer.step()
++            scaler.scale(loss).backward()
++            # Unscale before clipping so the clip threshold is in real
++            # gradient units, not scaled ones.
++            scaler.unscale_(optimizer)
++            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
++            scaler.step(optimizer)
++            scaler.update()
+ 
+             train_loss += loss.item()
+ 
+@@ -90,34 +128,29 @@ def train(args):
+ 
+         with torch.no_grad():
+             for x, y in val_loader:
+-                x = x.to(device)
+-                y = y.to(device)
++                x = x.to(device, non_blocking=use_cuda)
++                y = y.to(device, non_blocking=use_cuda)
+ 
+-                pred = model(x)
+-                loss = loss_fn(pred, y)
++                with torch.amp.autocast("cuda", enabled=use_cuda):
++                    pred = model(x)
++                    loss = loss_fn(pred, y)
+                 val_loss += loss.item()
+ 
+         val_loss /= len(val_loader)
++        scheduler.step(val_loss)
+ 
++        current_lr = optimizer.param_groups[0]["lr"]
+         print(
+             f"Epoch {epoch + 1}/{args.epochs} | "
+             f"Train Loss: {train_loss:.4f} | "
+-            f"Val Loss: {val_loss:.4f}"
++            f"Val Loss: {val_loss:.4f} | "
++            f"LR: {current_lr:.2e}"
+         )
+ 
+         if val_loss < best_val_loss:
+             best_val_loss = val_loss
+             epochs_without_improvement = 0
+-            checkpoint = {
+-                "model_state_dict": model.state_dict(),
+-                "d": args.d,
+-                "input_length": args.input_length,
+-                "prediction_length": args.prediction_length,
+-                "embed_dim": args.embed_dim,
+-                "num_heads": args.num_heads,
+-                "num_layers": args.num_layers,
+-                "dropout": args.dropout,
+-            }
++            checkpoint = {"model_state_dict": model.state_dict(), **_model_config(args)}
+             torch.save(checkpoint, checkpoint_dir / "best_model.pt")
+         else:
+             epochs_without_improvement += 1
+@@ -129,4 +162,4 @@ def train(args):
+                 break
+ 
+     print(f"Best validation loss: {best_val_loss:.4f}")
+-    print(f"Saved best model to {checkpoint_dir / 'best_model.pt'}")
+\ No newline at end of file
++    print(f"Saved best model to {checkpoint_dir / 'best_model.pt'}")

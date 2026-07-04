@@ -7,28 +7,12 @@ import numpy as np
 import torch
 
 from data import BWSequenceDataset
-from model import CoordinateTransformer
+from model import load_model
 
 
 def check_direction_sensitivity(data_dir="data", checkpoint_path="checkpoints/best_model.pt",
                                  lookback=5):
-    device = torch.device(
-        "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available()
-        else "cpu"
-    )
-
-    checkpoint = torch.load(checkpoint_path, map_location=device)
-    model = CoordinateTransformer(
-        d=checkpoint["d"],
-        input_length=checkpoint["input_length"],
-        prediction_length=checkpoint["prediction_length"],
-        embed_dim=checkpoint["embed_dim"],
-        num_heads=checkpoint["num_heads"],
-        num_layers=checkpoint["num_layers"],
-        dropout=checkpoint["dropout"],
-    ).to(device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model, checkpoint, device = load_model(checkpoint_path)
     model.eval()
 
     input_length = checkpoint["input_length"]

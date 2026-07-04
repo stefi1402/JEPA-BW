@@ -1,7 +1,37 @@
 """Transformer model used to predict future coordinates."""
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
+
+
+def load_model(checkpoint_path, device=None):
+    """Build a CoordinateTransformer from a saved checkpoint.
+
+    Centralizes the "read config out of checkpoint, build model, load
+    weights" dance that used to be duplicated in evaluate.py,
+    diagnostic_embeddings.py, and anywhere else a checkpoint is loaded.
+    """
+    if device is None:
+        device = torch.device(
+            "cuda" if torch.cuda.is_available()
+            else "mps" if torch.backends.mps.is_available()
+            else "cpu"
+        )
+
+    checkpoint = torch.load(Path(checkpoint_path), map_location=device)
+    model = CoordinateTransformer(
+        d=checkpoint["d"],
+        input_length=checkpoint["input_length"],
+        prediction_length=checkpoint["prediction_length"],
+        embed_dim=checkpoint["embed_dim"],
+        num_heads=checkpoint["num_heads"],
+        num_layers=checkpoint["num_layers"],
+        dropout=checkpoint["dropout"],
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    return model, checkpoint, device
 
 
 class CoordinateTransformer(nn.Module):
@@ -52,9 +82,20 @@ class CoordinateTransformer(nn.Module):
         x = x + self.time_embedding
         z = self.transformer(x)
 
-        # Use a summary of the whole sequence instead of just the last timestep
-        z_pooled = z.mean(dim=1)
-        coords = self.predictor(z_pooled)
+        # Pool on the last timestep, not the mean over all timesteps.
+        #
+        # The encoder is bidirectional (no causal mask), so z[:, -1, :]
+        # already attends to the whole sequence and is a valid "summary."
+        # But mean-pooling over 50+ frames dilutes exactly the signal this
+        # task depends on: where the object is *right now* and which way
+        # it's currently moving. That recent-motion signal lives in a
+        # handful of frames near the end; averaging it in with distant,
+        # already-stale positions pushes the model toward "predict the
+        # average / stay put" rather than "extrapolate the current
+        # trajectory" (see diagnostic_embeddings.py, which exists to check
+        # for exactly this failure mode).
+        z_last = z[:, -1, :]
+        coords = self.predictor(z_last)
         coords = coords.view(-1, self.prediction_length, 2)
         return coords
 

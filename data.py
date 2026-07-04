@@ -33,27 +33,69 @@ def generate_one_sequence(d, T, p, k):
     return frames, coords
 
 
+def generate_batch(n, d, T, p, k, rng=None):
+    """Vectorized equivalent of calling generate_one_sequence n times.
+
+    generate_one_sequence is kept around for single-sequence use (e.g. a
+    quick sanity check), but generating a full dataset by calling it in a
+    Python for-loop means T * total_sequences pure-Python iterations
+    (e.g. 100 * 14000 = 1.4M) just to build a training set. Here the
+    T-length loop stays in Python, but every iteration operates on all n
+    sequences at once via numpy, so the cost is ~T vectorized steps
+    instead of ~T * n scalar ones.
+
+    Note: this consumes randomness in a different order than repeated
+    generate_one_sequence calls, so it won't reproduce bit-identical
+    datasets for the same seed, but the generating distribution is
+    identical (uniform start position, independent per-step move
+    probability p, uniform choice of the 4 directions).
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    frames = np.zeros((n, T, d, d), dtype=np.float32)
+    coords = np.zeros((n, T, 2), dtype=np.float32)
+
+    row = rng.integers(0, d, size=n)
+    col = rng.integers(0, d, size=n)
+    idx = np.arange(n)
+
+    for t in range(T):
+        frames[idx, t, row, col] = 1.0
+        coords[idx, t, 0] = row
+        coords[idx, t, 1] = col
+
+        moves = rng.random(n) < p
+        direction = rng.integers(0, 4, size=n)  # 0=up 1=down 2=left 3=right
+
+        up = moves & (direction == 0)
+        down = moves & (direction == 1)
+        left = moves & (direction == 2)
+        right = moves & (direction == 3)
+
+        row[up] = np.maximum(0, row[up] - k)
+        row[down] = np.minimum(d - 1, row[down] + k)
+        col[left] = np.maximum(0, col[left] - k)
+        col[right] = np.minimum(d - 1, col[right] + k)
+
+    return frames, coords
+
+
 def generate_dataset(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     total_sequences = args.num_train + args.num_val + args.num_test
+    rng = np.random.default_rng(getattr(args, "seed", None))
 
-    all_frames = []
-    all_coords = []
-
-    for _ in range(total_sequences):
-        frames, coords = generate_one_sequence(
-            d=args.d,
-            T=args.T,
-            p=args.p,
-            k=args.k,
-        )
-        all_frames.append(frames)
-        all_coords.append(coords)
-
-    all_frames = np.stack(all_frames)
-    all_coords = np.stack(all_coords)
+    all_frames, all_coords = generate_batch(
+        n=total_sequences,
+        d=args.d,
+        T=args.T,
+        p=args.p,
+        k=args.k,
+        rng=rng,
+    )
 
     train_end = args.num_train
     val_end = args.num_train + args.num_val
