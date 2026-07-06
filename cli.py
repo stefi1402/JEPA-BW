@@ -11,8 +11,12 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument("--output-dir", type=str, default="data")
     generate_parser.add_argument("--d", type=int, default=10)
     generate_parser.add_argument("--T", type=int, default=100)
-    generate_parser.add_argument("--p", type=float, default=0.2)
-    generate_parser.add_argument("--k", type=int, default=1)
+    # NOTE: p=0 means the object never moves, which makes the whole
+    # forecasting task trivial ("predict the starting position"). Default
+    # to a nonzero move probability so `generate` produces a real task
+    # out of the box; override with --p 0 if a static baseline is wanted.
+    generate_parser.add_argument("--p", type=float, default=0.1)
+    generate_parser.add_argument("--k", type=int, default=3)
     generate_parser.add_argument("--num-train", type=int, default=10000)
     generate_parser.add_argument("--num-val", type=int, default=2000)
     generate_parser.add_argument("--num-test", type=int, default=2000)
@@ -21,7 +25,7 @@ def build_parser() -> argparse.ArgumentParser:
     transformer_parser = subparsers.add_parser("transformer")
     transformer_parser.add_argument("--d", type=int, default=10)
     transformer_parser.add_argument("--input-length", type=int, default=50)
-    transformer_parser.add_argument("--prediction-length", type=int, default=50)
+    transformer_parser.add_argument("--prediction-length", type=int, default=20)
     transformer_parser.add_argument("--embed-dim", type=int, default=64)
     transformer_parser.add_argument("--num-heads", type=int, default=4)
     transformer_parser.add_argument("--num-layers", type=int, default=2)
@@ -34,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--d", type=int, default=10)
     train_parser.add_argument("--input-length", type=int, default=50)
     train_parser.add_argument("--prediction-length", type=int, default=50)
+    # Was inconsistent with the `transformer` subcommand's default (64);
+    # unified here so a `transformer` dry run reflects what `train` builds.
     train_parser.add_argument("--embed-dim", type=int, default=64)
     train_parser.add_argument("--num-heads", type=int, default=4)
     train_parser.add_argument("--num-layers", type=int, default=2)
@@ -47,6 +53,21 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument(
         "--num-workers", type=int, default=0,
         help="DataLoader worker processes. >0 only helps if loading is a bottleneck.",
+    )
+    train_parser.add_argument(
+        "--viz-every", type=int, default=0,
+        help="Save a predicted-vs-true trajectory plot every N epochs to "
+             "<checkpoint-dir>/viz/ and to TensorBoard. 0 disables it (default).",
+    )
+    train_parser.add_argument(
+        "--log-dir", type=str, default="runs",
+        help="Root directory for TensorBoard logs. Each run gets its own "
+             "timestamped (or --run-name'd) subdirectory underneath it.",
+    )
+    train_parser.add_argument(
+        "--run-name", type=str, default=None,
+        help="Name for this run's TensorBoard subdirectory. Defaults to a "
+             "timestamp if not given.",
     )
 
     test_parser = subparsers.add_parser("test")
