@@ -9,7 +9,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     generate_parser = subparsers.add_parser("generate")
     generate_parser.add_argument("--output-dir", type=str, default="data")
-    generate_parser.add_argument("--d", type=int, default=10)
+    generate_parser.add_argument("--d", type=int, default=5)
     generate_parser.add_argument("--T", type=int, default=100)
     # NOTE: p=0 means the object never moves, which makes the whole
     # forecasting task trivial ("predict the starting position"). Default
@@ -28,14 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     transformer_parser.add_argument("--prediction-length", type=int, default=20)
     transformer_parser.add_argument("--embed-dim", type=int, default=64)
     transformer_parser.add_argument("--num-heads", type=int, default=4)
-    transformer_parser.add_argument("--num-layers", type=int, default=2)
+    transformer_parser.add_argument("--num-layers", type=int, default=1)
     transformer_parser.add_argument("--dropout", type=float, default=0.1)
     transformer_parser.add_argument("--batch-size", type=int, default=64)
 
     train_parser = subparsers.add_parser("train")
     train_parser.add_argument("--data-dir", type=str, default="data")
     train_parser.add_argument("--checkpoint-dir", type=str, default="checkpoints")
-    train_parser.add_argument("--d", type=int, default=10)
+    train_parser.add_argument("--d", type=int, default=5)
     train_parser.add_argument("--input-length", type=int, default=50)
     train_parser.add_argument("--prediction-length", type=int, default=50)
     # Was inconsistent with the `transformer` subcommand's default (64);

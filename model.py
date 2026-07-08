@@ -73,11 +73,27 @@ class CoordinateTransformer(nn.Module):
             nn.Linear(embed_dim, prediction_length * 2),
         )
 
+    def _last_position(self, x):
+        """Recover the (row, col) of the dot in the last input frame.
+
+        Each frame in x is one-hot over a d*d grid, so the last observed
+        position is just the argmax of the last frame, decoded back into
+        2D coordinates. No extra data needs to flow through the Dataset /
+        train loop for this -- it's already fully determined by x.
+        """
+        last_frame = x[:, -1, :]  # (batch, d*d)
+        flat_idx = last_frame.argmax(dim=-1)  # (batch,)
+        row = (flat_idx // self.d).float()
+        col = (flat_idx % self.d).float()
+        return torch.stack([row, col], dim=-1)  # (batch, 2)
+
     def forward(self, x):
         """
         x shape: (batch_size, input_length, d*d)
         output shape: (batch_size, prediction_length, 2)
         """
+        last_pos = self._last_position(x)  # (batch, 2)
+
         x = self.frame_embedding(x)
         x = x + self.time_embedding
         z = self.transformer(x)
@@ -95,8 +111,15 @@ class CoordinateTransformer(nn.Module):
         # trajectory" (see diagnostic_embeddings.py, which exists to check
         # for exactly this failure mode).
         z_last = z[:, -1, :]
-        coords = self.predictor(z_last)
-        coords = coords.view(-1, self.prediction_length, 2)
+
+        # Predict a *delta* from the last observed position rather than an
+        # absolute coordinate. At init (small weights) this makes the
+        # model's default prediction equal to the stay-put baseline, and
+        # weight decay pulls it back toward that same default instead of
+        # fighting against having to relearn "copy the input" from scratch.
+        delta = self.predictor(z_last)
+        delta = delta.view(-1, self.prediction_length, 2)
+        coords = last_pos.unsqueeze(1) + delta
         return coords
 
 

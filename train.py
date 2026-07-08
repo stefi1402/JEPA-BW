@@ -1,14 +1,17 @@
 """Training loop for the coordinate transformer."""
 
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 from data import BWSequenceDataset
 from model import CoordinateTransformer
+from visualize import render_predictions
 
 
 def _model_config(args):
@@ -42,6 +45,16 @@ def train(args):
 
     print(f"Device: {device}")
     print("Args:", vars(args))
+
+    # Every run gets its own timestamped subdirectory under --log-dir, so
+    # consecutive runs don't overwrite each other's TensorBoard logs and
+    # you can compare them side by side in the same dashboard. Pass
+    # --run-name to label a run explicitly (e.g. "baseline", "2layer").
+    run_name = getattr(args, "run_name", None) or datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_dir = Path(args.log_dir) / run_name
+    writer = SummaryWriter(log_dir=str(log_dir))
+    print(f"TensorBoard logs: {log_dir}")
+    print(f"  -> view with: tensorboard --logdir {args.log_dir}")
 
     train_dataset = BWSequenceDataset(
         path=Path(args.data_dir) / "train.npz",
@@ -77,7 +90,7 @@ def train(args):
 
     model = CoordinateTransformer(**_model_config(args)).to(device)
 
-    loss_fn = nn.SmoothL1Loss()
+    loss_fn = nn.MSELoss()
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -97,7 +110,16 @@ def train(args):
     checkpoint_dir = Path(args.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    viz_every = getattr(args, "viz_every", 0)
+    if viz_every:
+        viz_dir = checkpoint_dir / "viz"
+        viz_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Saving prediction snapshots to {viz_dir} and TensorBoard every {viz_every} epochs")
+
+    final_epoch = 0
+
     for epoch in range(args.epochs):
+        final_epoch = epoch + 1
         model.train()
         train_loss = 0.0
 
@@ -109,13 +131,16 @@ def train(args):
 
             with torch.amp.autocast("cuda", enabled=use_cuda):
                 pred = model(x)
-                loss = loss_fn(pred, y)
+                last_pos = model._last_position(x)
+                delta = pred - last_pos.unsqueeze(1)
+
+                loss = loss_fn(pred, y) + 1e-3 * delta.pow(2).mean()  
 
             scaler.scale(loss).backward()
             # Unscale before clipping so the clip threshold is in real
             # gradient units, not scaled ones.
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
@@ -147,6 +172,29 @@ def train(args):
             f"LR: {current_lr:.2e}"
         )
 
+        # Scalars: the numbers you were previously reading off stdout, now
+        # plotted over time in TensorBoard (Loss/train vs Loss/val on one
+        # graph makes the overfitting gap immediately visible).
+        writer.add_scalars("Loss", {"train": train_loss, "val": val_loss}, epoch + 1)
+        writer.add_scalar("LR", current_lr, epoch + 1)
+        writer.add_scalar("Grad_norm", grad_norm, epoch + 1)
+
+        if viz_every and (epoch + 1) % viz_every == 0:
+            fig = render_predictions(
+                model=model,
+                device=device,
+                data_dir=args.data_dir,
+                input_length=args.input_length,
+                prediction_length=args.prediction_length,
+                d=args.d,
+                title=f"epoch {epoch + 1} | val loss {val_loss:.4f}",
+            )
+            fig.savefig(viz_dir / f"epoch_{epoch + 1:04d}.png", dpi=110)
+            # add_figure renders the same matplotlib figure straight into
+            # TensorBoard's Images tab (and closes it for us), so you can
+            # scrub through epochs in one place instead of opening files.
+            writer.add_figure("Predictions", fig, global_step=epoch + 1, close=True)
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             epochs_without_improvement = 0
@@ -163,3 +211,20 @@ def train(args):
 
     print(f"Best validation loss: {best_val_loss:.4f}")
     print(f"Saved best model to {checkpoint_dir / 'best_model.pt'}")
+
+    # Logs this run's hyperparameters alongside its final result, so the
+    # TensorBoard HPARAMS tab can rank multiple runs by best_val_loss
+    # instead of you cross-referencing terminal scrollback by hand.
+    writer.add_hparams(
+        {
+            "lr": args.lr,
+            "batch_size": args.batch_size,
+            "embed_dim": args.embed_dim,
+            "num_heads": args.num_heads,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "weight_decay": args.weight_decay,
+        },
+        {"hparam/best_val_loss": best_val_loss, "hparam/final_epoch": final_epoch},
+    )
+    writer.close()

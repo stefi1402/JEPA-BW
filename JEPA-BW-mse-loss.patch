@@ -1,0 +1,26 @@
+diff --git a/evaluate.py b/evaluate.py
+index 081819e..c22e67f 100644
+--- a/evaluate.py
++++ b/evaluate.py
+@@ -45,7 +45,7 @@ def test(args):
+         shuffle=False,
+     )
+ 
+-    loss_fn = nn.SmoothL1Loss()
++    loss_fn = nn.MSELoss()
+ 
+     total_loss = 0.0
+     all_pred = []
+diff --git a/train.py b/train.py
+index 4701582..0a64979 100644
+--- a/train.py
++++ b/train.py
+@@ -90,7 +90,7 @@ def train(args):
+ 
+     model = CoordinateTransformer(**_model_config(args)).to(device)
+ 
+-    loss_fn = nn.SmoothL1Loss()
++    loss_fn = nn.MSELoss()
+     optimizer = torch.optim.AdamW(
+         model.parameters(),
+         lr=args.lr,
